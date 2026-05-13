@@ -1,0 +1,42 @@
+# Feature 4 — full-scene collision (robot + static obstacles)
+# See FEATURE_4_HANDOFF.md for frame alignment and obstacle definitions.
+
+collision:
+  urdf_path: "Assets/Robot APCC/IRB_1300_1400_URDF/urdf/IRB_1300_1400_URDF.urdf"
+  min_joint_gap: 1
+
+  # Trajectory-level check mode (user-selectable). CLI can override.
+  # - early_termination: stop at first colliding waypoint (fast pass/fail)
+  # - full_sweep: evaluate every waypoint (diagnostics + clearance trace)
+  mode: full_sweep
+
+  # Optional: remove ROBOT×ROBOT pairs that collide at every sampled configuration.
+  calibration:
+    enabled: false
+    n_samples: 20
+    seed: 42
+
+  # Primitive obstacles match FEATURE_4_HANDOFF §5 (mm → m inside SceneBuilder).
+  # Set use_primitives: false and provide mesh_path per item to use STL instead.
+  obstacles:
+    use_primitives: true
+    items:
+      - name: Obstacle_1
+        kind: box
+        corner_min_xyz_mm: [500, 0, 0]
+        size_xyz_mm: [150, 100, 200]
+      - name: Obstacle_2
+        kind: box
+        corner_min_xyz_mm: [0, 500, 0]
+        size_xyz_mm: [200, 150, 150]
+      - name: Obstacle_3
+        kind: cylinder
+        center_xy_mm: [250, -400]
+        radius_mm: 150
+        height_mm: 150
+
+  # Exact geometry names; pairs are skipped in the collision set.
+  # Midsole is OPTIONAL: when midsole_link is not in the model, the entry is
+  # silently ignored and any robot↔knife_blade contact stays flagged.
+  whitelist_pairs:
+    - ["midsole_link", "knife_blade"]
