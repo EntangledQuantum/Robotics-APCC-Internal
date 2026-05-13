@@ -106,6 +106,10 @@ class FeasibilityTask:
     max_ik_failures_per_trajectory: Optional[int] = None
     feasibility_only: bool = False
     export_waypoint_validity: bool = False
+    # Feature 4: full-scene collision check
+    enable_collision_check: bool = False
+    collision_config_path: Optional[str] = None
+    collision_mode_override: Optional[str] = None
 
 
 @dataclass
@@ -577,6 +581,9 @@ def run_single_analysis(task: FeasibilityTask) -> CombinationResult:
             max_ik_failures_per_trajectory=task.max_ik_failures_per_trajectory,
             solver_type=task.solver_type,
             export_waypoint_validity=task.export_waypoint_validity,
+            enable_collision_check=task.enable_collision_check,
+            collision_config_path=task.collision_config_path,
+            collision_mode_override=task.collision_mode_override,
         )
         
         # Extract per-trajectory metrics
@@ -1699,6 +1706,9 @@ def _build_task_list(
     solver_type: str = "pin",
     feasibility_only: bool = False,
     export_waypoint_validity: bool = False,
+    enable_collision_check: bool = False,
+    collision_config_path: Optional[str] = None,
+    collision_mode_override: Optional[str] = None,
 ) -> List[FeasibilityTask]:
     """
     Build list of tasks for all combinations.
@@ -1791,6 +1801,9 @@ def _build_task_list(
                     max_ik_failures_per_trajectory=max_ik_failures,
                     feasibility_only=feasibility_only,
                     export_waypoint_validity=export_waypoint_validity,
+                    enable_collision_check=enable_collision_check,
+                    collision_config_path=collision_config_path,
+                    collision_mode_override=collision_mode_override,
                 ))
     
     return tasks
@@ -2456,6 +2469,9 @@ def process_ranking_batch(
     solver_type_override: str = None,
     feasibility_only: bool = False,
     export_waypoint_validity: bool = False,
+    collision_enabled_override: Optional[bool] = None,
+    collision_config_path_override: Optional[str] = None,
+    collision_mode_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run feasibility ranking on all combinations.
@@ -2495,12 +2511,37 @@ def process_ranking_batch(
     if feasibility_only:
         logger.info("MODE: Feasibility-only (IK reachability check, no ranking)")
     
+    # Resolve Feature 4 collision-check settings (CLI > batch config > feas config)
+    collision_section = (
+        config.get('collision') if isinstance(config, dict) else None
+    ) or feas_config.get('collision') or {}
+    enable_collision_check = bool(collision_section.get('enabled', False))
+    collision_config_path = collision_section.get('config_path') or None
+    collision_mode = collision_section.get('mode') or None
+    if collision_enabled_override is not None:
+        enable_collision_check = bool(collision_enabled_override)
+    if collision_config_path_override is not None:
+        collision_config_path = collision_config_path_override
+    if collision_mode_override is not None:
+        collision_mode = collision_mode_override
+    if enable_collision_check:
+        logger.info(
+            f"Feature 4 collision check: enabled "
+            f"(config: {collision_config_path or 'config/collision_config.yaml'}, "
+            f"mode override: {collision_mode or '(from YAML)'})"
+        )
+    else:
+        logger.info("Feature 4 collision check: disabled")
+    
     # Step 5: Build task list
     tasks = _build_task_list(
         config, knife_poses, toolpath_files, output_dir, feas_config,
         detailed_per_trajectory_report, skip_plots,
         solver_type=solver_type, feasibility_only=feasibility_only,
         export_waypoint_validity=export_waypoint_validity,
+        enable_collision_check=enable_collision_check,
+        collision_config_path=collision_config_path,
+        collision_mode_override=collision_mode,
     )
     
     # Step 6: Execute tasks
@@ -2714,6 +2755,15 @@ def main():
                         help="Run IK feasibility check only (no ranking). Produces Feasibility-report.md.")
     parser.add_argument('--export-waypoint-validity', action='store_true',
                         help="Export per-waypoint IK validity CSV for each (robot, knife, toolpath) combination.")
+    parser.add_argument('--collision', dest='collision', action='store_true',
+                        default=None, help="Enable Feature 4 collision check (overrides config)")
+    parser.add_argument('--no-collision', dest='collision', action='store_false',
+                        help="Disable Feature 4 collision check (overrides config)")
+    parser.add_argument('--collision-config', default=None,
+                        help="Path to collision_config.yaml (overrides config)")
+    parser.add_argument('--collision-mode',
+                        choices=['full_sweep', 'early_termination'], default=None,
+                        help="Override collision.mode for this run")
     
     args = parser.parse_args()
     
@@ -2742,6 +2792,9 @@ def main():
             solver_type_override=args.solver,
             feasibility_only=args.feasibility_only,
             export_waypoint_validity=args.export_waypoint_validity,
+            collision_enabled_override=args.collision,
+            collision_config_path_override=args.collision_config,
+            collision_mode_override=args.collision_mode,
         )
         
         # Validate outputs (skip in feasibility_only mode — different output structure)

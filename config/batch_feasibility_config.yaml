@@ -98,6 +98,25 @@ continuity:
   default_speed_mm_s: 100.0
 
 # =============================================================================
+# Collision Check (Feature 4)
+# =============================================================================
+# Full-scene mesh-vs-mesh collision check on the IK trajectory, applied as
+# a Level 1 gate alongside reachability. Geometry and obstacles come from
+# `collision_config.yaml` (URDF + static obstacles + whitelist).
+collision:
+  # When true, run TrajectoryCollisionChecker on each trajectory's joint
+  # solutions and report collision_ok in the feasibility flags.
+  enabled: false
+
+  # Path to the Feature 4 collision config (URDF + obstacles + pairs).
+  # Resolved relative to the project root when not absolute.
+  config_path: "config/collision_config.yaml"
+
+  # Override `collision.mode` from the file ("full_sweep" or
+  # "early_termination"). Leave null to use whatever is in the YAML.
+  mode: null
+
+# =============================================================================
 # Output Options
 # =============================================================================
 # =============================================================================

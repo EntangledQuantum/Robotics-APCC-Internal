@@ -38,6 +38,8 @@ from core import (
     compute_manipulability, compute_singularity_proximity,
     SingularityAnalyzer, SingularityReport, SingularityType,
 )
+from core.trajectory_collision_checker import build_checker_from_collision_config
+from utils.collision_config_loader import load_collision_config
 from utils import (
     load_toolpath_trajectories,
     transform_trajectories_to_base_frame,
@@ -521,6 +523,9 @@ def process_toolpath(
     singularity_mode: str = "classified",
     check_j5_only: bool = True,
     j5_threshold_deg: float = 0.76,
+    enable_collision_check: bool = False,
+    collision_config_path: Optional[str] = None,
+    collision_mode_override: Optional[str] = None,
 ) -> dict:
     """
     Process a single toolpath for feasibility analysis.
@@ -554,6 +559,15 @@ def process_toolpath(
             wrist singularity is detected via the J5 geometric check
             (|sin(q5)| < sin(j5_threshold)) instead of the wrist sub-Jacobian σ_min.
         j5_threshold_deg: J5 angle threshold in degrees for the J5 geometric check.
+        enable_collision_check: If True, run the Feature 4
+            ``TrajectoryCollisionChecker`` on each trajectory's IK solutions
+            and surface ``collision_ok`` in ``feasibility_flags``.
+        collision_config_path: Path to ``collision_config.yaml``. When
+            ``enable_collision_check`` is True and this is None, defaults to
+            ``config/collision_config.yaml`` under the project root.
+        collision_mode_override: ``"full_sweep"`` or ``"early_termination"``
+            to override the mode set in the collision YAML. When None, the
+            value from YAML (or its default) is used.
         
     Returns:
         Dictionary with analysis results
@@ -608,6 +622,31 @@ def process_toolpath(
             check_j5_only=check_j5_only,
             j5_threshold_deg=j5_threshold_deg,
         )
+    
+    # Build Feature 4 collision checker once per toolpath (URDF + obstacles).
+    # Decoupled from the IK URDF: uses its own model from collision_config.yaml.
+    collision_checker = None
+    collision_mode = None
+    if enable_collision_check:
+        try:
+            collision_cfg = load_collision_config(collision_config_path)
+            collision_mode = collision_mode_override or str(collision_cfg.get("mode", "full_sweep"))
+            if collision_mode not in ("full_sweep", "early_termination"):
+                raise ValueError(
+                    f"collision mode must be 'full_sweep' or 'early_termination', got {collision_mode!r}"
+                )
+            collision_checker = build_checker_from_collision_config(
+                collision_cfg, project_root=Path(__file__).resolve().parent
+            )
+            if verbose:
+                print(
+                    f"  Collision check: enabled (mode={collision_mode}, "
+                    f"obstacles={sorted(collision_checker.env_name_to_code.keys())})"
+                )
+        except Exception as exc:
+            print(f"  WARNING: collision check requested but failed to initialize: {exc}")
+            collision_checker = None
+            collision_mode = None
     
     # Load and transform trajectories with per-waypoint speeds
     trajectories_t_p_k, trajectory_speeds = load_toolpath_trajectories(toolpath_path)
@@ -788,18 +827,65 @@ def process_toolpath(
         # Compute Feasibility Metrics (Level 1 required; Level 2-4 optional)
         # ---------------------------------------------------------------------
         feasibility_flags = traj_result.get('feasibility_flags', {})
+
+        # ---------------------------------------------------------------------
+        # Feature 4: full-scene collision gate (Pinocchio mesh-vs-mesh).
+        # Runs only when every waypoint produced a valid IK solution. If any
+        # IK failed, the trajectory is already infeasible — we skip the
+        # collision pass and set collision_ok = False.
+        # ---------------------------------------------------------------------
+        collision_traj_report = None
+        if collision_checker is not None:
+            reachability_ok = bool(feasibility_flags.get('reachability_ok', False))
+            if reachability_ok and len(joint_angles_rad) == n_waypoints:
+                try:
+                    collision_traj_report = collision_checker.check_trajectory(
+                        joint_angles_rad, mode=collision_mode
+                    )
+                    collision_ok = bool(collision_traj_report.collision_free)
+                except Exception as exc:
+                    print(f"    WARNING: collision check failed for {traj_name}: {exc}")
+                    collision_ok = False
+            else:
+                collision_ok = False
+            feasibility_flags['collision_ok'] = collision_ok
+            if collision_traj_report is not None and collision_traj_report.collision_free:
+                clearance = collision_traj_report.global_min_clearance_m
+                if clearance >= 0:
+                    print(f"    Collision (full scene): PASS (min clearance {clearance:.4f} m)")
+                else:
+                    print(f"    Collision (full scene): PASS")
+            elif collision_traj_report is not None:
+                wp = collision_traj_report.first_violation_waypoint_idx
+                pair = collision_traj_report.first_violation_pair
+                code = collision_traj_report.first_violation_code
+                pair_str = f"{pair[0]} ↔ {pair[1]}" if pair else "unknown pair"
+                print(f"    Collision (full scene): FAIL @ WP {wp}, {pair_str} (code {code})")
+            else:
+                # Either reachability was False or check raised.
+                print(f"    Collision (full scene): SKIPPED (reachability or checker unavailable)")
         
         if level1_only:
-            # Feasibility-only: only IK reachability matters (skip C0/C1)
-            level1_valid = feasibility_flags.get('reachability_ok', False)
-            print(f"    IK Feasibility: {'PASS' if level1_valid else 'FAIL'} "
-                  f"(reachability: {feasibility_flags.get('reachability_ok', False)})")
+            # Feasibility-only: IK reachability is required; collision joins
+            # the gate when the Feature 4 checker is active.
+            level1_valid = bool(feasibility_flags.get('reachability_ok', False))
+            if collision_checker is not None:
+                level1_valid = level1_valid and bool(feasibility_flags.get('collision_ok', False))
+                print(f"    IK Feasibility: {'PASS' if level1_valid else 'FAIL'} "
+                      f"(reachability: {feasibility_flags.get('reachability_ok', False)}, "
+                      f"collision_ok: {feasibility_flags.get('collision_ok', False)})")
+            else:
+                print(f"    IK Feasibility: {'PASS' if level1_valid else 'FAIL'} "
+                      f"(reachability: {feasibility_flags.get('reachability_ok', False)})")
         else:
-            # Full Level 1: IK 100% + C0 + C1 continuity
+            # Full Level 1: IK 100% + C0 + C1 continuity (+ collision when enabled)
             level1_valid = all(feasibility_flags.values())
+            extra = ""
+            if collision_checker is not None:
+                extra = f", collision_ok: {feasibility_flags.get('collision_ok', False)}"
             print(f"    Level 1 (Feasibility Gate): {'VALID' if level1_valid else 'INVALID'} "
                   f"(reachability: {feasibility_flags.get('reachability_ok', False)}, "
-                  f"C0: {feasibility_flags.get('c0_ok', False)}, C1: {feasibility_flags.get('c1_ok', False)})")
+                  f"C0: {feasibility_flags.get('c0_ok', False)}, C1: {feasibility_flags.get('c1_ok', False)}{extra})")
         
         # Level 2-4: Only computed when level1_only=False
         safety_tier = 0
@@ -886,6 +972,22 @@ def process_toolpath(
             'total_count': traj_result['num_waypoints']
         })
         
+        # Compact collision summary (None when the checker is disabled / skipped)
+        collision_summary = None
+        if collision_traj_report is not None:
+            collision_summary = {
+                'mode': collision_traj_report.mode,
+                'collision_free': collision_traj_report.collision_free,
+                'first_violation_waypoint_idx': collision_traj_report.first_violation_waypoint_idx,
+                'first_violation_pair': (
+                    list(collision_traj_report.first_violation_pair)
+                    if collision_traj_report.first_violation_pair else None
+                ),
+                'first_violation_code': collision_traj_report.first_violation_code,
+                'global_min_clearance_m': collision_traj_report.global_min_clearance_m,
+                'per_waypoint_predicted_code': list(collision_traj_report.per_waypoint_predicted_code),
+            }
+
         traj_data = {
             'trajectory_index': traj_idx + 1,
             'num_waypoints': n_waypoints,
@@ -911,6 +1013,8 @@ def process_toolpath(
             'reachable_flags': reachable.tolist(),
             'singularity_mode': singularity_mode,
             'classified_reports': classified_reports if classified_reports else None,
+            # Feature 4
+            'collision': collision_summary,
         }
         
         # Export classified singularity CSV report per trajectory
@@ -1056,6 +1160,14 @@ def main():
                         help="Skip all PNG plots")
     parser.add_argument('--solver', choices=['pin', 'eaik'], default='pin',
                         help="Solver backend: pin (Pinocchio) or eaik (EAIK analytical)")
+    parser.add_argument('--collision', action='store_true',
+                        help="Run Feature 4 full-scene collision check (default: off)")
+    parser.add_argument('--collision-config', default=None,
+                        help="Path to collision_config.yaml "
+                             "(default: config/collision_config.yaml)")
+    parser.add_argument('--collision-mode',
+                        choices=['full_sweep', 'early_termination'], default=None,
+                        help="Override collision.mode from the YAML")
     
     args = parser.parse_args()
     
@@ -1102,6 +1214,9 @@ def main():
         singularity_mode=args.singularity_mode,
         check_j5_only=not args.no_j5_only,
         j5_threshold_deg=args.j5_threshold_deg,
+        enable_collision_check=args.collision,
+        collision_config_path=args.collision_config,
+        collision_mode_override=args.collision_mode,
     )
     
     print("\nAnalysis complete!")

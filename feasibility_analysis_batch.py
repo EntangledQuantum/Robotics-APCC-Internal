@@ -64,6 +64,10 @@ class FeasibilityTask:
     level1_only: bool = True
     detailed_per_trajectory_report: bool = False
     export_waypoint_validity: bool = False
+    # Feature 4: full-scene collision check
+    enable_collision_check: bool = False
+    collision_config_path: Optional[str] = None
+    collision_mode_override: Optional[str] = None
 
 
 def run_single_analysis(task: FeasibilityTask) -> Dict[str, Any]:
@@ -90,6 +94,9 @@ def run_single_analysis(task: FeasibilityTask) -> Dict[str, Any]:
             detailed_per_trajectory_report=task.detailed_per_trajectory_report,
             solver_type=task.solver_type,
             export_waypoint_validity=task.export_waypoint_validity,
+            enable_collision_check=task.enable_collision_check,
+            collision_config_path=task.collision_config_path,
+            collision_mode_override=task.collision_mode_override,
         )
         
         return {
@@ -176,6 +183,9 @@ def process_batch(
     level1_only: bool = None,
     detailed_per_trajectory_report: bool = None,
     export_waypoint_validity: bool = False,
+    collision_enabled_override: Optional[bool] = None,
+    collision_config_path_override: Optional[str] = None,
+    collision_mode_override: Optional[str] = None,
 ) -> dict:
     """
     Run feasibility analysis on all combinations defined in config.
@@ -211,6 +221,30 @@ def process_batch(
     continuity_config = feas_config.get('continuity', {})
     run_continuity = continuity_config.get('enabled', True)
     speed_mm_s = continuity_config.get('default_speed_mm_s', 100.0)
+    
+    # Feature 4 collision settings (defaults to disabled). Accept config from
+    # either `config` (toolpath config) or `feas_config` (feasibility config).
+    collision_section = (
+        config.get('collision') if isinstance(config, dict) else None
+    ) or feas_config.get('collision') or {}
+    enable_collision_check = bool(collision_section.get('enabled', False))
+    collision_config_path = collision_section.get('config_path') or None
+    collision_mode = collision_section.get('mode') or None
+    # CLI overrides
+    if collision_enabled_override is not None:
+        enable_collision_check = bool(collision_enabled_override)
+    if collision_config_path_override is not None:
+        collision_config_path = collision_config_path_override
+    if collision_mode_override is not None:
+        collision_mode = collision_mode_override
+    if enable_collision_check:
+        print(
+            f"Feature 4 collision check: enabled "
+            f"(config: {collision_config_path or 'config/collision_config.yaml'}, "
+            f"mode override: {collision_mode or '(from YAML)'})"
+        )
+    else:
+        print("Feature 4 collision check: disabled")
     
     # Output options: Level 1 only by default; aggregated plots only by default
     output_config = config.get('output', {}) or feas_config.get('output', {})
@@ -283,6 +317,9 @@ def process_batch(
                     level1_only=level1_only,
                     detailed_per_trajectory_report=detailed_per_trajectory_report,
                     export_waypoint_validity=export_waypoint_validity,
+                    enable_collision_check=enable_collision_check,
+                    collision_config_path=collision_config_path,
+                    collision_mode_override=collision_mode,
                 ))
     
     print(f"\nPrepared {len(tasks)} analysis tasks")
@@ -355,6 +392,15 @@ def main():
                         help="Save per-trajectory plots (overrides config)")
     parser.add_argument('--export-waypoint-validity', action='store_true',
                         help="Export per-waypoint IK validity CSV for each combination.")
+    parser.add_argument('--collision', dest='collision', action='store_true',
+                        default=None, help="Enable Feature 4 collision check (overrides config)")
+    parser.add_argument('--no-collision', dest='collision', action='store_false',
+                        help="Disable Feature 4 collision check (overrides config)")
+    parser.add_argument('--collision-config', default=None,
+                        help="Path to collision_config.yaml (overrides config)")
+    parser.add_argument('--collision-mode',
+                        choices=['full_sweep', 'early_termination'], default=None,
+                        help="Override collision.mode for this run")
     
     args = parser.parse_args()
     
@@ -363,6 +409,9 @@ def main():
         level1_only=False if args.full_analysis else None,
         detailed_per_trajectory_report=True if args.per_trajectory_plots else None,
         export_waypoint_validity=args.export_waypoint_validity,
+        collision_enabled_override=args.collision,
+        collision_config_path_override=args.collision_config,
+        collision_mode_override=args.collision_mode,
     )
 
 
