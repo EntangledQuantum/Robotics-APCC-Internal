@@ -45,20 +45,6 @@ from .unified_singularity import (
 # --- Self-collision ---
 from .collision_checker import SelfCollisionChecker, CollisionResult
 
-# --- Feature 4: full-scene collision ---
-from .collision_report import (
-    CollisionCsvEvalSummary,
-    WaypointCollisionEval,
-    confusion_binary,
-)
-from .scene_builder import SceneContext, build_scene_from_config
-from .collision_group_manager import rebuild_collision_pairs
-from .trajectory_collision_checker import (
-    TrajectoryCollisionChecker,
-    TrajectoryCollisionReport,
-    build_checker_from_collision_config,
-)
-
 
 def create_solvers(urdf_path: str, solver: str = "eaik",
                    ik_config=None, ee_frame_name: str = "ee_link"):
@@ -132,14 +118,4 @@ __all__ = [
     'UnifiedSingularity', 'UnifiedSingularityReport',
     # Self-collision
     'SelfCollisionChecker', 'CollisionResult',
-    # Full-scene collision (Feature 4)
-    'CollisionCsvEvalSummary',
-    'WaypointCollisionEval',
-    'confusion_binary',
-    'SceneContext',
-    'build_scene_from_config',
-    'rebuild_collision_pairs',
-    'TrajectoryCollisionChecker',
-    'TrajectoryCollisionReport',
-    'build_checker_from_collision_config',
 ]
